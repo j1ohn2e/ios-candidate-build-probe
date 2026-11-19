@@ -145,7 +145,9 @@ final class MatrixCandidateTests: XCTestCase {
             tap(app.buttons["Continue"], "Acknowledge confirmed device", in: app)
         }
         if app.staticTexts[notificationTitle].waitForExistence(timeout: 15) {
-            tap(app.buttons["Not now"], "Choose no notifications for the loopback test", in: app)
+            let notNow = app.buttons["Not now"]
+            XCTAssertTrue(notNow.waitForExistence(timeout: 20), "Notification dismissal button")
+            tapVisibleCenter(of: notNow, context: "Dismiss notification onboarding", in: app)
             XCTAssertTrue(app.staticTexts[notificationTitle].waitForNonExistence(timeout: 30), "Dismissed notification onboarding")
         }
     }

@@ -2,6 +2,7 @@
 
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import hashlib
 from importlib.metadata import version
 from io import BytesIO
@@ -35,6 +36,18 @@ FILE_NAME = 'probe-note.txt'
 FILE_BYTES = b'Isolated Matrix attachment content for iOS.\n'
 
 
+@dataclass(frozen=True)
+class RoomFixture:
+    user: str
+    password: str
+    peer: str
+    peer_token: str
+    path: str
+    uri: str
+    image: str
+    file: str
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -54,7 +67,7 @@ class Matrix:
         if content_type:
             headers['Content-Type'] = content_type
         request = Request(BASE + path, data=data, headers=headers, method=method)
-        with self.opener.open(request, timeout=10) as response:
+        with self.opener.open(request, timeout=25) as response:
             return response.read()
 
     def call(self, method, path, data=None, token=None):
@@ -162,23 +175,45 @@ def prepare(api, directory):
         raise RuntimeError('Initial authenticated media bytes differ')
     # The App must obtain its own independent device through the sign-in UI.
     api.call('POST', CLIENT + '/logout', {}, user['access_token'])
-    announce('two synthetic accounts and one private room; two authenticated media byte checks passed')
     if not room.startswith('!'):
         raise ValueError('Unexpected room ID from the local Matrix API')
-    room_uri = 'matrix:roomid/' + quote(room[1:], safe=':')
-    return user['user_id'], token, room_path, password, png_uri, text_uri, room_uri
+    fixture = RoomFixture(user['user_id'], password, peer['user_id'], token, room_path,
+                          'matrix:roomid/' + quote(room[1:], safe=':'), png_uri, text_uri)
+    seed = {'msgtype': 'm.text', 'body': HISTORY}
+    send_peer_event(api, fixture, 'seed', seed)
+    if not peer_event_visible(api, fixture, seed):
+        raise RuntimeError('The peer cannot read its seeded timeline from the Matrix API')
+    announce('two synthetic accounts and one private room; timeline seed and two authenticated media byte checks passed')
+    return fixture
+
+
+def read_timeline(api, fixture):
+    return api.call('GET', fixture.path + '/messages?dir=b&limit=35', token=fixture.peer_token)['chunk']
+
+
+def peer_event_visible(api, fixture, content):
+    return any(event.get('sender') == fixture.peer and event.get('type') == 'm.room.message'
+               and all(event['content'].get(key) == value for key, value in content.items())
+               for event in read_timeline(api, fixture))
+
+
+def send_peer_event(api, fixture, transaction, content):
+    route = fixture.path + '/send/m.room.message/' + transaction
+    try:
+        api.call('PUT', route, content, fixture.peer_token)
+    except TimeoutError:
+        if peer_event_visible(api, fixture, content):
+            announce('confirmed peer event after response timeout')
+        else:
+            # Matrix deduplicates the same transaction ID on the same device.
+            api.call('PUT', route, content, fixture.peer_token)
 
 
 def probe_peer(api, fixture, stop):
-    user_id, token, room, _, png_uri, text_uri, _ = fixture
-
-    def messages():
-        return api.call('GET', room + '/messages?dir=b&limit=35', token=token)['chunk']
-
     def wait_for(predicate):
         while not stop.is_set():
-            found = [event['content'] for event in messages()
-                     if event.get('sender') == user_id and event.get('type') == 'm.room.message'
+            found = [event['content'] for event in read_timeline(api, fixture)
+                     if event.get('sender') == fixture.user and event.get('type') == 'm.room.message'
                      and predicate(event['content'])]
             if found:
                 if len(found) != 1:
@@ -187,44 +222,41 @@ def probe_peer(api, fixture, stop):
             stop.wait(0.7)
         raise RuntimeError('App run finished before the expected Matrix event reached the peer')
 
-    def send(transaction, content):
-        api.call('PUT', room + '/send/m.room.message/' + transaction, content, token)
-
-    send('seed', {'msgtype': 'm.text', 'body': HISTORY})
-    if not any(event.get('content', {}).get('body') == HISTORY for event in messages()):
-        raise RuntimeError('The peer cannot read its seeded timeline from the Matrix API')
-    announce('peer read the seeded event through the Matrix messages API')
     wait_for(lambda event: event.get('body') == OUTGOING)
     announce('peer observed one iOS text event')
-    send('reply', {'msgtype': 'm.text', 'body': REPLY})
+    send_peer_event(api, fixture, 'reply', {'msgtype': 'm.text', 'body': REPLY})
     wait_for(lambda event: event.get('body') == RESTORED)
-    send('after-restart', {'msgtype': 'm.text', 'body': RESTART_REPLY})
+    send_peer_event(api, fixture, 'after-restart', {'msgtype': 'm.text', 'body': RESTART_REPLY})
     announce('peer received the restored device message and sent a fresh reply')
 
-    send('image', {'msgtype': 'm.image', 'body': 'probe-image.png', 'url': png_uri,
-                   'info': {'mimetype': 'image/png', 'w': 64, 'h': 64}})
+    send_peer_event(api, fixture, 'image', {
+        'msgtype': 'm.image', 'body': 'probe-image.png', 'url': fixture.image,
+        'info': {'mimetype': 'image/png', 'w': 64, 'h': 64},
+    })
     image = wait_for(lambda event: event.get('msgtype') == 'm.image')
-    data = api.download(image['url'], token)
+    data = api.download(image['url'], fixture.peer_token)
     with Image.open(BytesIO(data)) as decoded:
         decoded.load()
         if decoded.size != (64, 64):
             raise ValueError('iOS image dimensions differ from the synthetic photo')
     announce('peer downloaded the iOS image and decoded 64x64 pixels')
 
-    send('file', {'msgtype': 'm.file', 'body': FILE_NAME, 'filename': FILE_NAME, 'url': text_uri,
-                  'info': {'mimetype': 'text/plain', 'size': len(FILE_BYTES)}})
+    send_peer_event(api, fixture, 'file', {
+        'msgtype': 'm.file', 'body': FILE_NAME, 'filename': FILE_NAME, 'url': fixture.file,
+        'info': {'mimetype': 'text/plain', 'size': len(FILE_BYTES)},
+    })
     file = wait_for(lambda event: event.get('msgtype') == 'm.file' and event.get('body') == FILE_NAME)
-    received = api.download(file['url'], token)
+    received = api.download(file['url'], fixture.peer_token)
     if received != FILE_BYTES:
         raise ValueError('Round-tripped TXT bytes differ')
     announce('peer downloaded the iOS text file sha256=' + hashlib.sha256(received).hexdigest())
 
 
 def run_ui(api, fixture, command):
-    _, _, _, password, _, _, room_uri = fixture
+    password = fixture.password
     env = dict(os.environ, TEST_RUNNER_MATRIX_BASE=BASE, TEST_RUNNER_MATRIX_USER=USER,
                TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME,
-               TEST_RUNNER_MATRIX_ROOM_URI=room_uri, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
+               TEST_RUNNER_MATRIX_ROOM_URI=fixture.uri, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
                TEST_RUNNER_MATRIX_OUTGOING=OUTGOING, TEST_RUNNER_MATRIX_REPLY=REPLY,
                TEST_RUNNER_MATRIX_RESTORED=RESTORED, TEST_RUNNER_MATRIX_RESTART_REPLY=RESTART_REPLY,
                TEST_RUNNER_MATRIX_FILE=FILE_NAME)
