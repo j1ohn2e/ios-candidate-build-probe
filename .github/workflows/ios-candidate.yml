@@ -1,0 +1,70 @@
+name: Build public iOS candidate
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  simulator-build:
+    # Fail closed on missing visibility, and avoid metered private-repository minutes.
+    if: ${{ toJSON(github.event.repository.private) == 'false' }}
+    runs-on: xcode-27
+    timeout-minutes: 80
+    env:
+      CANDIDATE_REVISION: f4a48300ef7d86036b2cbf712792ab2bb0ca4f52
+      DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Verify Xcode and install build tools
+        run: |
+          xcodebuild -version
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 27.0
+          unset HOMEBREW_NO_INSTALL_FROM_API
+          export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+          brew install xcodegen swiftlint swiftformat pkl
+          xcodegen --version
+          git lfs version
+
+      - name: Download pinned public candidate
+        working-directory: ${{ runner.temp }}
+        run: |
+          git init public-ios-candidate
+          cd public-ios-candidate
+          git lfs install --local --skip-repo
+          git remote add origin https://github.com/element-hq/element-x-ios.git
+          git fetch --no-tags --depth=1 origin "$CANDIDATE_REVISION"
+          GIT_LFS_SKIP_SMUDGE=1 git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_REVISION"
+          # The Debug app references these media assets. Snapshot fixtures belong to test schemes.
+          git lfs pull --include='Components/DevelopmentAssets/Media/**' --exclude=''
+
+      - name: Build Debug app and extensions for the iOS simulator
+        working-directory: ${{ runner.temp }}/public-ios-candidate
+        run: |
+          xcodegen generate
+          xcodebuild build \
+            -project ElementX.xcodeproj \
+            -scheme ElementX \
+            -configuration Debug \
+            -sdk iphonesimulator27.0 \
+            -destination 'generic/platform=iOS Simulator' \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -derivedDataPath "$RUNNER_TEMP/ios-candidate-build" \
+            CODE_SIGNING_ALLOWED=NO
+          git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+      - name: Verify simulator product and both extensions
+        run: |
+          app="$RUNNER_TEMP/ios-candidate-build/Build/Products/Debug-iphonesimulator/ElementX.app"
+          for bundle in "$app" "$app/PlugIns/NSE.appex" "$app/PlugIns/ShareExtension.appex"; do
+            platform=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$bundle/Info.plist")
+            test "$platform" = iPhoneSimulator
+            executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")
+            xcrun lipo -verify_arch arm64 "$bundle/$executable"
+            printf 'Verified arm64 simulator product: %s\n' "${bundle##*/}"
+          done
+          printf 'Candidate source revision: %s\n' "$CANDIDATE_REVISION"
