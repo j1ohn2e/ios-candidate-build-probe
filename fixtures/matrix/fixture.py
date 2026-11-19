@@ -113,7 +113,7 @@ def start_server(directory, api):
     command = [sys.executable, '-m', 'synapse.app.homeserver', '-c', str(config)]
     with (directory / 'synapse.log').open('wb') as log:
         subprocess.run(command + ['--generate-missing-configs'], cwd=directory, stdout=log, stderr=log,
-                       check=True, timeout=30)
+                       check=True, timeout=90)
         process = subprocess.Popen(command, cwd=directory, stdout=log, stderr=log)
     try:
         deadline = time.monotonic() + 70
@@ -253,8 +253,11 @@ def report_server_observations(directory):
 def main():
     parser = ArgumentParser()
     parser.add_argument('--directory', type=Path, required=True)
+    parser.add_argument('--simulator')
     parser.add_argument('command', nargs='*')
     args = parser.parse_args()
+    if bool(args.simulator) != bool(args.command):
+        parser.error('Simulator and XCTest command must be provided together')
     directory = args.directory.resolve()
     directory.mkdir(mode=0o700)
     api = Matrix()
@@ -262,6 +265,7 @@ def main():
     try:
         fixture = prepare(api, directory)
         if args.command:
+            subprocess.run(['xcrun', 'simctl', 'bootstatus', args.simulator, '-b'], check=True, timeout=240)
             run_ui(api, fixture, args.command)
     finally:
         stop_server(server)
