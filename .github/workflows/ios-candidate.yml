@@ -2,6 +2,11 @@ name: Build public iOS candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      startup_ui:
+        description: Test the sign-in screen with the simulator-only configuration
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -14,6 +19,7 @@ jobs:
     env:
       CANDIDATE_REVISION: f4a48300ef7d86036b2cbf712792ab2bb0ca4f52
       DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+      SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.0,arch=arm64
     defaults:
       run:
         shell: bash
@@ -42,15 +48,84 @@ jobs:
           # The Debug app references these media assets. Snapshot fixtures belong to test schemes.
           git lfs pull --include='Components/DevelopmentAssets/Media/**' --exclude=''
 
-      - name: Build Debug app and extensions for the iOS simulator
+      - name: Prepare isolated startup configuration and UI test
+        if: ${{ inputs.startup_ui }}
         working-directory: ${{ runner.temp }}/public-ios-candidate
         run: |
+          unset SENTRY_DSN SENTRY_RUST_DSN POSTHOG_HOST POSTHOG_API_KEY RAGESHAKE_URL MAPLIBRE_API_KEY
+          pkl eval -o Components/Secrets/Secrets.swift Components/Secrets/Secrets.pkl
+          for key in sentryDSN sentryRustDSN postHogHost postHogAPIKey rageshakeURL mapLibreAPIKey; do
+            grep -Eq "static let $key: String\\? = nil[[:space:]]*$" Components/Secrets/Secrets.swift
+          done
+
+          cat > UITests/Sources/PublicCandidateStartupTests.swift <<'SWIFT'
+          import XCTest
+
+          @MainActor
+          final class PublicCandidateStartupTests: XCTestCase {
+              func testSimplifiedChineseAndArabicStartup() {
+                  continueAfterFailure = false
+                  let chinese = startupOffset(language: "zh-Hans", region: "zh_CN",
+                                              signIn: "手动登录", qr: "使用二维码登录",
+                                              developerOptions: "开发者选项")
+                  XCTAssertGreaterThan(chinese, 4, "Developer button should be right of the version in LTR.")
+
+                  let arabic = startupOffset(language: "ar", region: "ar_SA",
+                                              signIn: "تسجيل الدخول يدوياً",
+                                              qr: "تسجيل الدخول باستخدام رمز QR",
+                                              developerOptions: "خيارات المطوِّرين")
+                  XCTAssertLessThan(arabic, -4, "Developer button should be left of the version in RTL.")
+              }
+
+              private func startupOffset(language: String, region: String, signIn: String,
+                                         qr: String, developerOptions: String) -> CGFloat {
+                  let app = XCUIApplication()
+                  app.launchArguments = ["-AppleLanguages", "(\(language))", "-AppleLocale", region]
+                  app.launch()
+                  defer { app.terminate() }
+
+                  let identifiers = A11yIdentifiers.authenticationStartScreen
+                  let signInButton = app.buttons[identifiers.signIn]
+                  XCTAssertTrue(signInButton.waitForExistence(timeout: 30))
+                  XCTAssertTrue(signInButton.isHittable)
+                  XCTAssertEqual(signInButton.label, signIn)
+                  let qrButton = app.buttons[identifiers.signInWithQr]
+                  XCTAssertTrue(qrButton.isHittable)
+                  XCTAssertEqual(qrButton.label, qr)
+
+                  let version = app.staticTexts[identifiers.appVersion]
+                  let developerButton = app.buttons[developerOptions]
+                  XCTAssertTrue(version.isHittable)
+                  XCTAssertTrue(developerButton.exists)
+                  let delta = developerButton.frame.midX - version.frame.midX
+
+                  let attachment = XCTAttachment(screenshot: app.screenshot())
+                  attachment.name = "startup-\(language)"
+                  attachment.lifetime = .keepAlways
+                  add(attachment)
+                  let englishHeadline = app.staticTexts["Be in your element"].exists
+                  print("STARTUP_UI language=\(language) offset=\(delta) englishHeadline=\(englishHeadline)")
+                  return delta
+              }
+          }
+          SWIFT
+
+      - name: Build Debug app and extensions for the iOS simulator
+        working-directory: ${{ runner.temp }}/public-ios-candidate
+        env:
+          STARTUP_UI: ${{ inputs.startup_ui }}
+        run: |
           xcodegen generate
+          if [[ "$STARTUP_UI" == true ]]; then
+            entitlements=ElementX/SupportingFiles/ElementX.entitlements
+            /usr/libexec/PlistBuddy -c 'Delete :aps-environment' "$entitlements"
+            /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "$entitlements"
+          fi
           xcodebuild build \
             -project ElementX.xcodeproj \
             -scheme ElementX \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0,arch=arm64' \
+            -destination "$SIMULATOR_DESTINATION" \
             -onlyUsePackageVersionsFromResolvedFile \
             -derivedDataPath "$RUNNER_TEMP/ios-candidate-build"
           git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
@@ -66,3 +141,30 @@ jobs:
             printf 'Verified arm64 simulator product: %s\n' "${bundle##*/}"
           done
           printf 'Candidate source revision: %s\n' "$CANDIDATE_REVISION"
+
+      - name: Check installed app startup in Simplified Chinese and Arabic
+        if: ${{ inputs.startup_ui }}
+        working-directory: ${{ runner.temp }}/public-ios-candidate
+        run: |
+          app="$RUNNER_TEMP/ios-candidate-build/Build/Products/Debug-iphonesimulator/ElementX.app"
+          signed_entitlements="$RUNNER_TEMP/ios-startup-entitlements.plist"
+          codesign -d --entitlements :- "$app" > "$signed_entitlements"
+          plutil -lint "$signed_entitlements"
+          for key in aps-environment com.apple.developer.associated-domains; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$signed_entitlements" >/dev/null 2>&1; then
+              printf 'Startup app unexpectedly has entitlement: %s\n' "$key" >&2
+              exit 1
+            fi
+          done
+          xcodebuild test \
+            -project ElementX.xcodeproj \
+            -scheme UITests \
+            -configuration Debug \
+            -destination "$SIMULATOR_DESTINATION" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -derivedDataPath "$RUNNER_TEMP/ios-candidate-build" \
+            -resultBundlePath "$RUNNER_TEMP/ios-startup.xcresult" \
+            -parallel-testing-enabled NO \
+            -enableCodeCoverage NO \
+            -only-testing:UITests/PublicCandidateStartupTests/testSimplifiedChineseAndArabicStartup
+          git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
