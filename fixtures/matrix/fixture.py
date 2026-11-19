@@ -228,16 +228,25 @@ def run_ui(api, fixture, command):
     with ThreadPoolExecutor(max_workers=1) as pool:
         peer = pool.submit(probe_peer, api, fixture, stop)
         try:
-            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=700)
-            for stream, output in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
-                for line in output.splitlines(keepends=True):
-                    if 'SecureTextField' in line:
-                        line = re.sub(r"\bType .+? into ", "Type '<fixture-password>' into ", line)
-                    stream.write(line.replace(password, '<fixture-password>'))
+            try:
+                result = subprocess.run(command, env=env, capture_output=True, timeout=700)
+            except subprocess.TimeoutExpired as error:
+                report_xctest_output(error.stdout, error.stderr, password)
+                raise
+            report_xctest_output(result.stdout, result.stderr, password)
             result.check_returncode()
             peer.result(timeout=25)
         finally:
             stop.set()
+
+
+def report_xctest_output(stdout, stderr, password):
+    for stream, output in ((sys.stdout, stdout), (sys.stderr, stderr)):
+        for line in (output or b'').decode('utf-8', errors='replace').splitlines(keepends=True):
+            if 'SecureTextField' in line:
+                line = re.sub(r"\bType .+? into ", "Type '<fixture-password>' into ", line)
+            stream.write(line.replace(password, '<fixture-password>'))
+        stream.flush()
 
 
 def report_server_observations(directory):

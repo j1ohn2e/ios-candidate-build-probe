@@ -249,4 +249,6 @@ jobs:
               -destination "platform=iOS Simulator,id=$simulator,arch=arm64" \
               -resultBundlePath "$RUNNER_TEMP/ios-matrix.xcresult" \
               -parallel-testing-enabled NO \
+              -test-timeouts-enabled YES \
+              -maximum-test-execution-time-allowance 480 \
               -only-testing:UITests/MatrixCandidateTests/testNativeMatrixExchange
