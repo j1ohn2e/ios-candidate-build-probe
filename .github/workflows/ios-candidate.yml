@@ -7,6 +7,11 @@ on:
         description: Test the sign-in screen with the simulator-only configuration
         type: boolean
         default: false
+      matrix_probe:
+        description: Run the isolated Synapse preflight
+        type: choice
+        options: ['off', server]
+        default: 'off'
 
 permissions: {}
 
@@ -25,7 +30,35 @@ jobs:
         shell: bash
 
     steps:
+      - name: Select Python for the owned Matrix fixture
+        if: ${{ inputs.matrix_probe != 'off' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12.10'
+
+      - name: Build pinned Synapse and verify the loopback fixture
+        if: ${{ inputs.matrix_probe != 'off' }}
+        env:
+          CARGO_BUILD_JOBS: 2
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+        run: |
+          fixtures="$RUNNER_TEMP/public-matrix-fixture"
+          git init "$fixtures"
+          git -C "$fixtures" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$fixtures" checkout --detach FETCH_HEAD
+          test "$(git -C "$fixtures" rev-parse HEAD)" = "$GITHUB_SHA"
+          archive="$RUNNER_TEMP/matrix_synapse-1.165.0.tar.gz"
+          curl -fsSL --retry 2 --max-time 120 -o "$archive" \
+            https://files.pythonhosted.org/packages/29/a7/df38048c4226c43503bf99841972009e002591d3eefe50f6ae7f812d080f/matrix_synapse-1.165.0.tar.gz
+          printf '%s  %s\n' 3ea0ce402ecca0b85460ce1bd0b98652bfe0b5bcf701452b763395eaf48319bc "$archive" \
+            | shasum -a 256 -c -
+          python -m venv "$RUNNER_TEMP/synapse-venv"
+          python="$RUNNER_TEMP/synapse-venv/bin/python"
+          "$python" -m pip install --no-cache-dir "$archive"
+          "$python" "$fixtures/fixtures/matrix/fixture.py" --directory "$RUNNER_TEMP/matrix-preflight"
+
       - name: Verify Xcode and install build tools
+        if: ${{ inputs.matrix_probe != 'server' }}
         run: |
           xcodebuild -version
           test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 27.0
@@ -36,6 +69,7 @@ jobs:
           git lfs version
 
       - name: Download pinned public candidate
+        if: ${{ inputs.matrix_probe != 'server' }}
         working-directory: ${{ runner.temp }}
         run: |
           git init public-ios-candidate
@@ -49,7 +83,7 @@ jobs:
           git lfs pull --include='Components/DevelopmentAssets/Media/**' --exclude=''
 
       - name: Prepare isolated startup configuration and UI test
-        if: ${{ inputs.startup_ui }}
+        if: ${{ inputs.startup_ui && inputs.matrix_probe == 'off' }}
         working-directory: ${{ runner.temp }}/public-ios-candidate
         run: |
           unset SENTRY_DSN SENTRY_RUST_DSN POSTHOG_HOST POSTHOG_API_KEY RAGESHAKE_URL MAPLIBRE_API_KEY
@@ -113,6 +147,7 @@ jobs:
           SWIFT
 
       - name: Build Debug app and extensions for the iOS simulator
+        if: ${{ inputs.matrix_probe != 'server' }}
         working-directory: ${{ runner.temp }}/public-ios-candidate
         env:
           STARTUP_UI: ${{ inputs.startup_ui }}
@@ -133,6 +168,7 @@ jobs:
           git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
       - name: Verify simulator product and both extensions
+        if: ${{ inputs.matrix_probe != 'server' }}
         run: |
           app="$RUNNER_TEMP/ios-candidate-build/Build/Products/Debug-iphonesimulator/ElementX.app"
           for bundle in "$app" "$app/PlugIns/NSE.appex" "$app/PlugIns/ShareExtension.appex"; do
@@ -145,7 +181,7 @@ jobs:
           printf 'Candidate source revision: %s\n' "$CANDIDATE_REVISION"
 
       - name: Check installed app startup in Simplified Chinese and Arabic
-        if: ${{ inputs.startup_ui }}
+        if: ${{ inputs.startup_ui && inputs.matrix_probe == 'off' }}
         working-directory: ${{ runner.temp }}/public-ios-candidate
         run: |
           app="$RUNNER_TEMP/ios-candidate-build/Build/Products/Debug-iphonesimulator/ElementX.app"
