@@ -163,11 +163,14 @@ def prepare(api, directory):
     # The App must obtain its own independent device through the sign-in UI.
     api.call('POST', CLIENT + '/logout', {}, user['access_token'])
     announce('two synthetic accounts and one private room; two authenticated media byte checks passed')
-    return user['user_id'], token, room_path, password, png_uri, text_uri
+    if not room.startswith('!'):
+        raise ValueError('Unexpected room ID from the local Matrix API')
+    room_uri = 'matrix:roomid/' + quote(room[1:], safe=':')
+    return user['user_id'], token, room_path, password, png_uri, text_uri, room_uri
 
 
 def probe_peer(api, fixture, stop):
-    user_id, token, room, _, png_uri, text_uri = fixture
+    user_id, token, room, _, png_uri, text_uri, _ = fixture
 
     def messages():
         events = api.call('GET', room + '/messages?dir=b&limit=35', token=token)['chunk']
@@ -214,9 +217,10 @@ def probe_peer(api, fixture, stop):
 
 
 def run_ui(api, fixture, command):
-    _, _, _, password, _, _ = fixture
+    _, _, _, password, _, _, room_uri = fixture
     env = dict(os.environ, TEST_RUNNER_MATRIX_BASE=BASE, TEST_RUNNER_MATRIX_USER=USER,
-               TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
+               TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME,
+               TEST_RUNNER_MATRIX_ROOM_URI=room_uri, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
                TEST_RUNNER_MATRIX_OUTGOING=OUTGOING, TEST_RUNNER_MATRIX_REPLY=REPLY,
                TEST_RUNNER_MATRIX_RESTORED=RESTORED, TEST_RUNNER_MATRIX_RESTART_REPLY=RESTART_REPLY,
                TEST_RUNNER_MATRIX_FILE=FILE_NAME)

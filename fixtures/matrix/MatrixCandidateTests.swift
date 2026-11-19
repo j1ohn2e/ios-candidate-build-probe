@@ -11,6 +11,9 @@ final class MatrixCandidateTests: XCTestCase {
         let user = try XCTUnwrap(environment["MATRIX_USER"])
         let password = try XCTUnwrap(environment["MATRIX_PASSWORD"])
         let room = try XCTUnwrap(environment["MATRIX_ROOM"])
+        let uri = try XCTUnwrap(environment["MATRIX_ROOM_URI"])
+        XCTAssertTrue(uri.hasPrefix("matrix:roomid/"))
+        let roomURL = try XCTUnwrap(URL(string: uri))
         let history = try XCTUnwrap(environment["MATRIX_HISTORY"])
         let outgoing = try XCTUnwrap(environment["MATRIX_OUTGOING"])
         let reply = try XCTUnwrap(environment["MATRIX_REPLY"])
@@ -38,7 +41,7 @@ final class MatrixCandidateTests: XCTestCase {
             passwordField.typeText(password)
             tap(signIn, "Submit sign-in", in: app)
             finishFirstRun(in: app)
-            openRoom(app, named: room)
+            openRoom(app, named: room, url: roomURL)
         }
 
         XCTContext.runActivity(named: "MATRIX_UI exchange live text") { _ in
@@ -50,7 +53,7 @@ final class MatrixCandidateTests: XCTestCase {
         XCTContext.runActivity(named: "MATRIX_UI restart and verify a fresh sync") { _ in
             app.terminate()
             app.launch()
-            openRoom(app, named: room)
+            openRoom(app, named: room, url: roomURL)
             expectText(outgoing, in: app)
             expectText(reply, in: app)
             sendText(restored, in: app)
@@ -123,17 +126,15 @@ final class MatrixCandidateTests: XCTestCase {
         app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
     }
 
-    private func openRoom(_ app: XCUIApplication, named room: String) {
+    private func openRoom(_ app: XCUIApplication, named room: String, url: URL) {
         let cell = app.buttons[A11yIdentifiers.homeScreen.roomName(room)]
-        XCTAssertTrue(cell.waitForExistence(timeout: 65), "Joined fixture room")
-        tapVisibleCenter(of: cell, context: "Joined fixture room", in: app)
-        let composer = app.textViews[A11yIdentifiers.roomScreen.messageComposer]
-        let opened = composer.waitForExistence(timeout: 30)
-        if !opened {
-            let titles = app.staticTexts.allElementsBoundByIndex.prefix(12).map(\.label).joined(separator: " | ")
-            XCTContext.runActivity(named: "MATRIX_UI visible labels after room tap: \(titles)") { _ in }
+        XCTAssertTrue(cell.waitForExistence(timeout: 65), "Joined fixture room available in the list")
+        XCTContext.runActivity(named: "MATRIX_UI open the joined room through its registered Matrix URL") { _ in
+            app.open(url)
+            XCTAssertTrue(app.buttons[room].waitForExistence(timeout: 35), "Native room header")
+            let composer = app.textViews[A11yIdentifiers.roomScreen.messageComposer]
+            XCTAssertTrue(composer.waitForExistence(timeout: 25), "Native message composer")
         }
-        XCTAssertTrue(opened, "Opened the room's message composer")
     }
 
     private func finishFirstRun(in app: XCUIApplication) {
