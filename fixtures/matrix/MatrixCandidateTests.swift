@@ -151,7 +151,9 @@ final class MatrixCandidateTests: XCTestCase {
     }
 
     private func expectText(_ text: String, in app: XCUIApplication) {
-        let messages = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", text)).firstMatch
+        let timeline = NSPredicate(format: "value CONTAINS %@ AND identifier != %@",
+                                   text, A11yIdentifiers.roomScreen.messageComposer)
+        let messages = app.textViews.matching(timeline).firstMatch
         XCTAssertTrue(messages.waitForExistence(timeout: 45), "Missing Matrix timeline text: \(text)")
     }
 
@@ -159,7 +161,9 @@ final class MatrixCandidateTests: XCTestCase {
         let composer = app.textViews[A11yIdentifiers.roomScreen.messageComposer]
         tap(composer, "Message composer", in: app)
         composer.typeText(text)
+        XCTAssertEqual(composer.value as? String, text, "The typed text is in the native composer")
         tap(app.buttons[A11yIdentifiers.roomScreen.sendButton], "Send text", in: app)
+        expectText(text, in: app)
     }
 
     private func openAttachments(in app: XCUIApplication) {

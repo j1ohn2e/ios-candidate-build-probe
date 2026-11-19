@@ -173,12 +173,13 @@ def probe_peer(api, fixture, stop):
     user_id, token, room, _, png_uri, text_uri, _ = fixture
 
     def messages():
-        events = api.call('GET', room + '/messages?dir=b&limit=35', token=token)['chunk']
-        return [event['content'] for event in events if event.get('sender') == user_id and event.get('type') == 'm.room.message']
+        return api.call('GET', room + '/messages?dir=b&limit=35', token=token)['chunk']
 
     def wait_for(predicate):
         while not stop.is_set():
-            found = [event for event in messages() if predicate(event)]
+            found = [event['content'] for event in messages()
+                     if event.get('sender') == user_id and event.get('type') == 'm.room.message'
+                     and predicate(event['content'])]
             if found:
                 if len(found) != 1:
                     raise AssertionError('Expected exactly one matching iOS event')
@@ -190,6 +191,9 @@ def probe_peer(api, fixture, stop):
         api.call('PUT', room + '/send/m.room.message/' + transaction, content, token)
 
     send('seed', {'msgtype': 'm.text', 'body': HISTORY})
+    if not any(event.get('content', {}).get('body') == HISTORY for event in messages()):
+        raise RuntimeError('The peer cannot read its seeded timeline from the Matrix API')
+    announce('peer read the seeded event through the Matrix messages API')
     wait_for(lambda event: event.get('body') == OUTGOING)
     announce('peer observed one iOS text event')
     send('reply', {'msgtype': 'm.text', 'body': REPLY})
@@ -234,6 +238,8 @@ def run_ui(api, fixture, command):
                 report_xctest_output(error.stdout, error.stderr, password)
                 raise
             report_xctest_output(result.stdout, result.stderr, password)
+            if peer.done():
+                peer.result()
             result.check_returncode()
             peer.result(timeout=25)
         finally:
@@ -252,12 +258,15 @@ def report_xctest_output(stdout, stderr, password):
 def report_server_observations(directory):
     counts = {}
     for line in (directory / 'access.log').read_text(encoding='utf-8').splitlines():
-        match = re.search(r' \d+B (\d{3})!? "(GET|POST) (/_matrix/client/[^? ]+)(?:\?[^ ]*)? HTTP/', line)
+        match = re.search(r' \d+B (\d{3})!? "(GET|POST|PUT) (/_matrix/client/[^? ]+)(?:\?[^ ]*)? HTTP/', line)
         if not match:
             continue
         status, method, route = match.groups()
-        if (method == 'POST' and route.endswith('/login')) or route.endswith('/sync'):
-            key = (method, 'login' if route.endswith('/login') else 'sync', status)
+        operation = route.rsplit('/', 1)[-1]
+        if method == 'PUT' and '/send/m.room.message/' in route:
+            operation = 'room-message'
+        if operation in {'login', 'sync', 'messages', 'room-message'}:
+            key = (method, operation, status)
             counts[key] = counts.get(key, 0) + 1
     for (method, operation, status), count in sorted(counts.items()):
         announce(f'client {method} {operation}: http={status} count={count}')
