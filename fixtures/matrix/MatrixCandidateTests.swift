@@ -56,12 +56,17 @@ final class MatrixCandidateTests: XCTestCase {
             expectText(restartReply, in: app)
         }
 
-        XCTContext.runActivity(named: "MATRIX_UI open the peer image and send a synthetic photo") { _ in
+        XCTContext.runActivity(named: "MATRIX_UI open, save and re-send the peer image") { _ in
             tap(labelled("Image", in: app), "Peer image")
+            downloadPreview(in: app)
+            let photosPermission = app.alerts.buttons["Allow"]
+            if photosPermission.waitForExistence(timeout: 5), photosPermission.isHittable {
+                photosPermission.tap()
+            }
             closePreview(in: app)
             openAttachments(in: app)
             tap(app.buttons[A11yIdentifiers.roomScreen.attachmentPickerPhotoLibrary], "Photo library")
-            tap(app.scrollViews.images.firstMatch, "Synthetic photo", timeout: 25)
+            tap(app.scrollViews.images.firstMatch, "Saved peer photo", timeout: 25)
             let pickerAdd = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Add")).firstMatch
             if pickerAdd.waitForExistence(timeout: 3), pickerAdd.isHittable {
                 pickerAdd.tap()
@@ -71,10 +76,7 @@ final class MatrixCandidateTests: XCTestCase {
 
         XCTContext.runActivity(named: "MATRIX_UI open, download and re-send the peer TXT") { _ in
             tap(labelled("File", in: app), "Peer TXT event", timeout: 45)
-            let details = app.navigationBars.buttons
-                .matching(NSPredicate(format: "label IN %@", ["Info", "Details"])).firstMatch
-            tap(details, "File preview details")
-            tap(app.buttons["Download"], "Download TXT", timeout: 30)
+            downloadPreview(in: app)
             let localStorage = labelled("On My iPhone", in: app)
             if localStorage.waitForExistence(timeout: 3), localStorage.isHittable {
                 localStorage.tap()
@@ -131,6 +133,13 @@ final class MatrixCandidateTests: XCTestCase {
     private func closePreview(in app: XCUIApplication) {
         let close = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "Close"])).firstMatch
         tap(close, "Close media preview")
+    }
+
+    private func downloadPreview(in app: XCUIApplication) {
+        let details = app.navigationBars.buttons
+            .matching(NSPredicate(format: "NOT (label IN %@)", ["Done", "Close", "Back"])).firstMatch
+        tap(details, "Media preview details")
+        tap(app.buttons["Download"], "Download the previewed media", timeout: 30)
     }
 
     private func sendPreview(in app: XCUIApplication) {

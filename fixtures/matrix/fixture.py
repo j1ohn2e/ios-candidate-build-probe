@@ -153,11 +153,11 @@ def prepare(api, directory):
     # The App must obtain its own independent device through the sign-in UI.
     api.call('POST', CLIENT + '/logout', {}, user['access_token'])
     announce('two synthetic accounts and one private room; two authenticated media byte checks passed')
-    return user['user_id'], token, room_path, password, photo, png_uri, text_uri
+    return user['user_id'], token, room_path, password, png_uri, text_uri
 
 
 def probe_peer(api, fixture, stop):
-    user_id, token, room, _, _, png_uri, text_uri = fixture
+    user_id, token, room, _, png_uri, text_uri = fixture
 
     def messages():
         events = api.call('GET', room + '/messages?dir=b&limit=35', token=token)['chunk']
@@ -203,10 +203,8 @@ def probe_peer(api, fixture, stop):
     announce('peer downloaded the iOS text file sha256=' + hashlib.sha256(received).hexdigest())
 
 
-def run_ui(api, fixture, simulator, command):
-    _, _, _, password, photo, _, _ = fixture
-    subprocess.run(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], check=True, timeout=180)
-    subprocess.run(['xcrun', 'simctl', 'addmedia', simulator, str(photo)], check=True, timeout=45)
+def run_ui(api, fixture, command):
+    _, _, _, password, _, _ = fixture
     env = dict(os.environ, TEST_RUNNER_MATRIX_BASE=BASE, TEST_RUNNER_MATRIX_USER=USER,
                TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
                TEST_RUNNER_MATRIX_OUTGOING=OUTGOING, TEST_RUNNER_MATRIX_REPLY=REPLY,
@@ -228,11 +226,8 @@ def run_ui(api, fixture, simulator, command):
 def main():
     parser = ArgumentParser()
     parser.add_argument('--directory', type=Path, required=True)
-    parser.add_argument('--simulator')
     parser.add_argument('command', nargs='*')
     args = parser.parse_args()
-    if bool(args.simulator) != bool(args.command):
-        parser.error('Simulator and XCTest command must be provided together')
     directory = args.directory.resolve()
     directory.mkdir(mode=0o700)
     api = Matrix()
@@ -240,7 +235,7 @@ def main():
     try:
         fixture = prepare(api, directory)
         if args.command:
-            run_ui(api, fixture, args.simulator, args.command)
+            run_ui(api, fixture, args.command)
     finally:
         stop_server(server)
 

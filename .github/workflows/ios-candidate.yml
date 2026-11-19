@@ -244,7 +244,7 @@ jobs:
           test "${#runs[@]}" -eq 1
           test -f "${runs[0]}"
           "$RUNNER_TEMP/synapse-venv/bin/python" "$RUNNER_TEMP/public-matrix-fixture/fixtures/matrix/fixture.py" \
-            --directory "$RUNNER_TEMP/matrix-ui" --simulator "$simulator" -- \
+            --directory "$RUNNER_TEMP/matrix-ui" -- \
             xcodebuild test-without-building -xctestrun "${runs[0]}" \
               -destination "platform=iOS Simulator,id=$simulator,arch=arm64" \
               -resultBundlePath "$RUNNER_TEMP/ios-matrix.xcresult" \
