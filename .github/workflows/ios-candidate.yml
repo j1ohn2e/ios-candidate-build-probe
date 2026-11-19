@@ -51,7 +51,7 @@ jobs:
             -scheme ElementX \
             -configuration Debug \
             -sdk iphonesimulator27.0 \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0,arch=arm64' \
             -onlyUsePackageVersionsFromResolvedFile \
             -derivedDataPath "$RUNNER_TEMP/ios-candidate-build" \
             CODE_SIGNING_ALLOWED=NO
