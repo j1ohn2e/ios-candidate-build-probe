@@ -111,15 +111,22 @@ final class MatrixCandidateTests: XCTestCase {
 
     private func openRoom(_ app: XCUIApplication, named room: String) {
         let cell = app.buttons[A11yIdentifiers.homeScreen.roomName(room)]
-        let found = cell.waitForExistence(timeout: 65)
-        if !found {
+        XCTAssertTrue(cell.waitForExistence(timeout: 65), "Joined fixture room")
+        let window = app.windows.firstMatch
+        let visible = cell.frame.intersection(window.frame)
+        XCTContext.runActivity(named: "MATRIX_UI room row frame=\(cell.frame) visible=\(visible)") { _ in }
+        XCTAssertGreaterThan(visible.width, 0, "Fixture room is on screen")
+        XCTAssertGreaterThan(visible.height, 0, "Fixture room is on screen")
+        let origin = window.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+        let offset = CGVector(dx: visible.midX - window.frame.minX, dy: visible.midY - window.frame.minY)
+        origin.withOffset(offset).tap()
+        let composer = app.textViews[A11yIdentifiers.roomScreen.messageComposer]
+        let opened = composer.waitForExistence(timeout: 30)
+        if !opened {
             let titles = app.staticTexts.allElementsBoundByIndex.prefix(12).map(\.label).joined(separator: " | ")
-            XCTContext.runActivity(named: "MATRIX_UI visible labels before room: \(titles)") { _ in }
+            XCTContext.runActivity(named: "MATRIX_UI visible labels after room tap: \(titles)") { _ in }
         }
-        XCTAssertTrue(found, "Joined fixture room")
-        // XCTest scrolls an existing room row into view before sending the tap.
-        cell.tap()
-        XCTAssertTrue(app.buttons[A11yIdentifiers.roomScreen.name].waitForExistence(timeout: 30), "Room header")
+        XCTAssertTrue(opened, "Opened the room's message composer")
     }
 
     private func finishFirstRun(in app: XCUIApplication) {
