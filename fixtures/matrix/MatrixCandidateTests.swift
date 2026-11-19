@@ -111,11 +111,14 @@ final class MatrixCandidateTests: XCTestCase {
 
     private func openRoom(_ app: XCUIApplication, named room: String) {
         let cell = app.buttons[A11yIdentifiers.homeScreen.roomName(room)]
-        if !cell.waitForExistence(timeout: 45) {
+        let found = cell.waitForExistence(timeout: 65)
+        if !found {
             let titles = app.staticTexts.allElementsBoundByIndex.prefix(12).map(\.label).joined(separator: " | ")
             XCTContext.runActivity(named: "MATRIX_UI visible labels before room: \(titles)") { _ in }
         }
-        tap(cell, "Joined fixture room", timeout: 65)
+        XCTAssertTrue(found, "Joined fixture room")
+        // XCTest scrolls an existing room row into view before sending the tap.
+        cell.tap()
         XCTAssertTrue(app.buttons[A11yIdentifiers.roomScreen.name].waitForExistence(timeout: 30), "Room header")
     }
 
@@ -128,6 +131,7 @@ final class MatrixCandidateTests: XCTestCase {
         }
         if app.staticTexts[notificationTitle].waitForExistence(timeout: 15) {
             tap(app.buttons["Not now"], "Choose no notifications for the loopback test")
+            XCTAssertTrue(app.staticTexts[notificationTitle].waitForNonExistence(timeout: 30), "Dismissed notification onboarding")
         }
     }
 
