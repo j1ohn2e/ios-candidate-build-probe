@@ -37,6 +37,7 @@ final class MatrixCandidateTests: XCTestCase {
             tap(passwordField, "Synthetic password")
             passwordField.typeText(password)
             tap(signIn, "Submit sign-in")
+            finishFirstRun(in: app)
             openRoom(app, named: room)
         }
 
@@ -110,8 +111,24 @@ final class MatrixCandidateTests: XCTestCase {
 
     private func openRoom(_ app: XCUIApplication, named room: String) {
         let cell = app.buttons[A11yIdentifiers.homeScreen.roomName(room)]
+        if !cell.waitForExistence(timeout: 45) {
+            let titles = app.staticTexts.allElementsBoundByIndex.prefix(12).map(\.label).joined(separator: " | ")
+            XCTContext.runActivity(named: "MATRIX_UI visible labels before room: \(titles)") { _ in }
+        }
         tap(cell, "Joined fixture room", timeout: 65)
         XCTAssertTrue(app.buttons[A11yIdentifiers.roomScreen.name].waitForExistence(timeout: 30), "Room header")
+    }
+
+    private func finishFirstRun(in app: XCUIApplication) {
+        let notificationTitle = "Allow notifications and never miss a message"
+        let verifiedTitle = "Device verified"
+        let screens = app.staticTexts.matching(NSPredicate(format: "label IN %@", [notificationTitle, verifiedTitle]))
+        if screens.firstMatch.waitForExistence(timeout: 45), app.staticTexts[verifiedTitle].exists {
+            tap(app.buttons["Continue"], "Acknowledge confirmed device")
+        }
+        if app.staticTexts[notificationTitle].waitForExistence(timeout: 15) {
+            tap(app.buttons["Not now"], "Choose no notifications for the loopback test")
+        }
     }
 
     private func expectText(_ text: String, in app: XCUIApplication) {

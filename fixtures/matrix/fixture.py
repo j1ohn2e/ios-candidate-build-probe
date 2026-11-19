@@ -8,6 +8,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -89,11 +90,20 @@ def announce(message):
 
 def start_server(directory, api):
     config = directory / 'homeserver.json'
+    logging_config = directory / 'logging.json'
+    logging_config.write_text(json.dumps({
+        'version': 1,
+        'formatters': {'plain': {'format': '%(message)s'}},
+        'handlers': {'access': {'class': 'logging.FileHandler', 'formatter': 'plain',
+                                'filename': str(directory / 'access.log'), 'encoding': 'utf-8'}},
+        'loggers': {'synapse.access.http': {'level': 'INFO', 'handlers': ['access'], 'propagate': False}},
+    }), encoding='utf-8')
     config.write_text(json.dumps({
         'server_name': SERVER, 'public_baseurl': BASE + '/', 'report_stats': False,
         'listeners': [{'port': 8090, 'type': 'http', 'bind_addresses': ['127.0.0.1'],
                        'resources': [{'names': ['client'], 'compress': False}]}],
         'database': {'name': 'sqlite3', 'args': {'database': str(directory / 'homeserver.db')}},
+        'log_config': str(logging_config),
         'signing_key_path': str(directory / 'signing.key'), 'media_store_path': str(directory / 'media'),
         'registration_shared_secret': secrets.token_hex(32),
         'enable_registration': True, 'enable_registration_without_verification': True,
@@ -215,12 +225,29 @@ def run_ui(api, fixture, command):
         peer = pool.submit(probe_peer, api, fixture, stop)
         try:
             result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=700)
-            sys.stdout.write(result.stdout.replace(password, '<fixture-password>'))
-            sys.stderr.write(result.stderr.replace(password, '<fixture-password>'))
+            for stream, output in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
+                for line in output.splitlines(keepends=True):
+                    if 'SecureTextField' in line:
+                        line = re.sub(r"\bType .+? into ", "Type '<fixture-password>' into ", line)
+                    stream.write(line.replace(password, '<fixture-password>'))
             result.check_returncode()
             peer.result(timeout=25)
         finally:
             stop.set()
+
+
+def report_server_observations(directory):
+    counts = {}
+    for line in (directory / 'access.log').read_text(encoding='utf-8').splitlines():
+        match = re.search(r' \d+B (\d{3})!? "(GET|POST) (/_matrix/client/[^? ]+)(?:\?[^ ]*)? HTTP/', line)
+        if not match:
+            continue
+        status, method, route = match.groups()
+        if (method == 'POST' and route.endswith('/login')) or route.endswith('/sync'):
+            key = (method, 'login' if route.endswith('/login') else 'sync', status)
+            counts[key] = counts.get(key, 0) + 1
+    for (method, operation, status), count in sorted(counts.items()):
+        announce(f'client {method} {operation}: http={status} count={count}')
 
 
 def main():
@@ -238,6 +265,8 @@ def main():
             run_ui(api, fixture, args.command)
     finally:
         stop_server(server)
+        if args.command:
+            report_server_observations(directory)
 
 
 if __name__ == '__main__':
