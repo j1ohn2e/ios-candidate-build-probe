@@ -15,7 +15,7 @@ from threading import Event
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from PIL import Image, ImageDraw
 
@@ -25,6 +25,7 @@ BASE = 'http://' + SERVER
 CLIENT = '/_matrix/client/v3'
 USER = 'ios_probe'
 ROOM_NAME = 'iOS native Matrix probe'
+HISTORY = 'Native iOS fixture history'
 OUTGOING = 'iOS native outbound'
 REPLY = 'Peer reply after iOS send'
 RESTORED = 'iOS restored session online'
@@ -33,9 +34,14 @@ FILE_NAME = 'probe-note.txt'
 FILE_BYTES = b'Isolated Matrix attachment content for iOS.\n'
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Matrix:
     def __init__(self):
-        self.opener = build_opener(ProxyHandler({}))
+        self.opener = build_opener(ProxyHandler({}), NoRedirect)
 
     def request(self, method, path, data=None, token=None, content_type=None):
         headers = {}
@@ -170,15 +176,16 @@ def probe_peer(api, fixture, stop):
     def send(transaction, content):
         api.call('PUT', room + '/send/m.room.message/' + transaction, content, token)
 
-    send('seed', {'msgtype': 'm.text', 'body': 'Native iOS fixture history'})
+    send('seed', {'msgtype': 'm.text', 'body': HISTORY})
     wait_for(lambda event: event.get('body') == OUTGOING)
     announce('peer observed one iOS text event')
     send('reply', {'msgtype': 'm.text', 'body': REPLY})
+    wait_for(lambda event: event.get('body') == RESTORED)
+    send('after-restart', {'msgtype': 'm.text', 'body': RESTART_REPLY})
+    announce('peer received the restored device message and sent a fresh reply')
+
     send('image', {'msgtype': 'm.image', 'body': 'probe-image.png', 'url': png_uri,
                    'info': {'mimetype': 'image/png', 'w': 64, 'h': 64}})
-    send('file', {'msgtype': 'm.file', 'body': FILE_NAME, 'filename': FILE_NAME, 'url': text_uri,
-                  'info': {'mimetype': 'text/plain', 'size': len(FILE_BYTES)}})
-
     image = wait_for(lambda event: event.get('msgtype') == 'm.image')
     data = api.download(image['url'], token)
     with Image.open(BytesIO(data)) as decoded:
@@ -186,15 +193,14 @@ def probe_peer(api, fixture, stop):
         if decoded.size != (64, 64):
             raise ValueError('iOS image dimensions differ from the synthetic photo')
     announce('peer downloaded the iOS image and decoded 64x64 pixels')
+
+    send('file', {'msgtype': 'm.file', 'body': FILE_NAME, 'filename': FILE_NAME, 'url': text_uri,
+                  'info': {'mimetype': 'text/plain', 'size': len(FILE_BYTES)}})
     file = wait_for(lambda event: event.get('msgtype') == 'm.file' and event.get('body') == FILE_NAME)
     received = api.download(file['url'], token)
     if received != FILE_BYTES:
         raise ValueError('Round-tripped TXT bytes differ')
     announce('peer downloaded the iOS text file sha256=' + hashlib.sha256(received).hexdigest())
-
-    wait_for(lambda event: event.get('body') == RESTORED)
-    send('after-restart', {'msgtype': 'm.text', 'body': RESTART_REPLY})
-    announce('peer received the restored device message and sent a fresh reply')
 
 
 def run_ui(api, fixture, simulator, command):
@@ -202,7 +208,7 @@ def run_ui(api, fixture, simulator, command):
     subprocess.run(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], check=True, timeout=180)
     subprocess.run(['xcrun', 'simctl', 'addmedia', simulator, str(photo)], check=True, timeout=45)
     env = dict(os.environ, TEST_RUNNER_MATRIX_BASE=BASE, TEST_RUNNER_MATRIX_USER=USER,
-               TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME,
+               TEST_RUNNER_MATRIX_PASSWORD=password, TEST_RUNNER_MATRIX_ROOM=ROOM_NAME, TEST_RUNNER_MATRIX_HISTORY=HISTORY,
                TEST_RUNNER_MATRIX_OUTGOING=OUTGOING, TEST_RUNNER_MATRIX_REPLY=REPLY,
                TEST_RUNNER_MATRIX_RESTORED=RESTORED, TEST_RUNNER_MATRIX_RESTART_REPLY=RESTART_REPLY,
                TEST_RUNNER_MATRIX_FILE=FILE_NAME)
@@ -210,7 +216,10 @@ def run_ui(api, fixture, simulator, command):
     with ThreadPoolExecutor(max_workers=1) as pool:
         peer = pool.submit(probe_peer, api, fixture, stop)
         try:
-            subprocess.run(command, env=env, check=True, timeout=700)
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=700)
+            sys.stdout.write(result.stdout.replace(password, '<fixture-password>'))
+            sys.stderr.write(result.stderr.replace(password, '<fixture-password>'))
+            result.check_returncode()
             peer.result(timeout=25)
         finally:
             stop.set()

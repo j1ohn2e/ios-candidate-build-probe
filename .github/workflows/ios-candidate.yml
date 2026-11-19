@@ -8,9 +8,9 @@ on:
         type: boolean
         default: false
       matrix_probe:
-        description: Run the isolated Synapse preflight
+        description: Run the isolated Synapse preflight or the native Matrix UI scenario
         type: choice
-        options: ['off', server]
+        options: ['off', server, ui]
         default: 'off'
 
 permissions: {}
@@ -82,15 +82,22 @@ jobs:
           # The Debug app references these media assets. Snapshot fixtures belong to test schemes.
           git lfs pull --include='Components/DevelopmentAssets/Media/**' --exclude=''
 
-      - name: Prepare isolated startup configuration and UI test
-        if: ${{ inputs.startup_ui && inputs.matrix_probe == 'off' }}
+      - name: Prepare isolated application configuration and UI test
+        if: ${{ (inputs.startup_ui && inputs.matrix_probe == 'off') || inputs.matrix_probe == 'ui' }}
         working-directory: ${{ runner.temp }}/public-ios-candidate
+        env:
+          MATRIX_PROBE: ${{ inputs.matrix_probe }}
         run: |
           unset SENTRY_DSN SENTRY_RUST_DSN POSTHOG_HOST POSTHOG_API_KEY RAGESHAKE_URL MAPLIBRE_API_KEY
           pkl eval -o Components/Secrets/Secrets.swift Components/Secrets/Secrets.pkl
           for key in sentryDSN sentryRustDSN postHogHost postHogAPIKey rageshakeURL mapLibreAPIKey; do
             grep -Eq "static let $key: String\\? = nil[[:space:]]*$" Components/Secrets/Secrets.swift
           done
+
+          if [[ "$MATRIX_PROBE" == ui ]]; then
+            cp "$RUNNER_TEMP/public-matrix-fixture/fixtures/matrix/MatrixCandidateTests.swift" UITests/Sources/
+            exit 0
+          fi
 
           cat > UITests/Sources/PublicCandidateStartupTests.swift <<'SWIFT'
           import XCTest
@@ -151,20 +158,32 @@ jobs:
         working-directory: ${{ runner.temp }}/public-ios-candidate
         env:
           STARTUP_UI: ${{ inputs.startup_ui }}
+          MATRIX_PROBE: ${{ inputs.matrix_probe }}
         run: |
           xcodegen generate
-          if [[ "$STARTUP_UI" == true ]]; then
+          if [[ "$STARTUP_UI" == true || "$MATRIX_PROBE" == ui ]]; then
             entitlements=ElementX/SupportingFiles/ElementX.entitlements
             /usr/libexec/PlistBuddy -c 'Delete :aps-environment' "$entitlements"
             /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "$entitlements"
           fi
-          xcodebuild build \
-            -project ElementX.xcodeproj \
-            -scheme ElementX \
-            -configuration Debug \
-            -destination "$SIMULATOR_DESTINATION" \
-            -onlyUsePackageVersionsFromResolvedFile \
+          settings=(
+            -project ElementX.xcodeproj
+            -configuration Debug
+            -destination "$SIMULATOR_DESTINATION"
+            -onlyUsePackageVersionsFromResolvedFile
             -derivedDataPath "$RUNNER_TEMP/ios-candidate-build"
+          )
+          if [[ "$MATRIX_PROBE" == ui ]]; then
+            info=ElementX/SupportingFiles/Info.plist
+            /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' "$info"
+            /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSExceptionDomains dict' "$info"
+            /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSExceptionDomains:127.0.0.1 dict' "$info"
+            /usr/libexec/PlistBuddy -c \
+              'Add :NSAppTransportSecurity:NSExceptionDomains:127.0.0.1:NSExceptionAllowsInsecureHTTPLoads bool true' "$info"
+            xcodebuild build-for-testing -scheme UITests "${settings[@]}" -enableCodeCoverage NO
+          else
+            xcodebuild build -scheme ElementX "${settings[@]}"
+          fi
           git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
       - name: Verify simulator product and both extensions
@@ -180,9 +199,8 @@ jobs:
           done
           printf 'Candidate source revision: %s\n' "$CANDIDATE_REVISION"
 
-      - name: Check installed app startup in Simplified Chinese and Arabic
-        if: ${{ inputs.startup_ui && inputs.matrix_probe == 'off' }}
-        working-directory: ${{ runner.temp }}/public-ios-candidate
+      - name: Verify isolated simulator signing entitlements
+        if: ${{ (inputs.startup_ui && inputs.matrix_probe == 'off') || inputs.matrix_probe == 'ui' }}
         run: |
           app="$RUNNER_TEMP/ios-candidate-build/Build/Products/Debug-iphonesimulator/ElementX.app"
           signed_entitlements="$RUNNER_TEMP/ios-startup-entitlements.plist"
@@ -194,6 +212,11 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Check installed app startup in Simplified Chinese and Arabic
+        if: ${{ inputs.startup_ui && inputs.matrix_probe == 'off' }}
+        working-directory: ${{ runner.temp }}/public-ios-candidate
+        run: |
           xcodebuild test \
             -project ElementX.xcodeproj \
             -scheme UITests \
@@ -206,3 +229,24 @@ jobs:
             -enableCodeCoverage NO \
             -only-testing:UITests/PublicCandidateStartupTests/testSimplifiedChineseAndArabicStartup
           git diff --exit-code HEAD -- ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+      - name: Exercise the installed iOS app with two loopback Matrix peers
+        if: ${{ inputs.matrix_probe == 'ui' }}
+        working-directory: ${{ runner.temp }}/public-ios-candidate
+        run: |
+          simulator=$(xcrun simctl list devices available --json | python -c '
+          import json, sys
+          group = json.load(sys.stdin)["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-27-0"]
+          target, = [item["udid"] for item in group if item["name"] == "iPhone 17"]
+          print(target)
+          ')
+          runs=("$RUNNER_TEMP/ios-candidate-build/Build/Products/UITests"*.xctestrun)
+          test "${#runs[@]}" -eq 1
+          test -f "${runs[0]}"
+          "$RUNNER_TEMP/synapse-venv/bin/python" "$RUNNER_TEMP/public-matrix-fixture/fixtures/matrix/fixture.py" \
+            --directory "$RUNNER_TEMP/matrix-ui" --simulator "$simulator" -- \
+            xcodebuild test-without-building -xctestrun "${runs[0]}" \
+              -destination "platform=iOS Simulator,id=$simulator,arch=arm64" \
+              -resultBundlePath "$RUNNER_TEMP/ios-matrix.xcresult" \
+              -parallel-testing-enabled NO \
+              -only-testing:UITests/MatrixCandidateTests/testNativeMatrixExchange
